@@ -26,7 +26,7 @@ an Excel spreadsheet to Bob using the SMTP client.
 #+BEGIN_SRC haskell
 >>> :set -XOverloadedStrings
 >>> :module Network.Mail.Mime Network.Mail.Client.Gmail
->>> sendGmail "alice" "password" (Address (Just "Alice") "alice@gmail.com") [Address (Just "Bob") "bob@example.com"] [] [] "Excel Spreadsheet" "Hi Bob,\n\nThe Excel spreadsheet is attached.\n\nRegards,\n\nAlice" ["spreadsheet.xls"] Nothing
+>>> sendGmail "alice" "password" (Address (Just "Alice") "alice@gmail.com") [Address (Just "Bob") "bob@example.com"] [] [] "Excel Spreadsheet" "Hi Bob,\n\nThe Excel spreadsheet is attached.\n\nRegards,\n\nAlice" ["Spreadsheet.xls"]
 #+END_SRC
 
 ** Resources
