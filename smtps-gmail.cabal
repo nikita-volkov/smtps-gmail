@@ -1,10 +1,10 @@
 Name:               smtps-gmail
-Version:            1.2.0
+Version:            1.2.1
 License:            BSD3
 License-File:       LICENSE
 Copyright:          Copyright (c) 2014, Enzo Haussecker. All rights reserved.
-Author:             Enzo Haussecker <enzo@ucsd.edu>
-Maintainer:         Enzo Haussecker <enzo@ucsd.edu>
+Author:             Enzo Haussecker <ehaussecker@gmail.com>
+Maintainer:         Enzo Haussecker <ehaussecker@gmail.com>
 Stability:          Experimental
 Category:           Network
 Synopsis:           Gmail SMTP Client

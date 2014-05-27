@@ -1,12 +1,16 @@
----------------------------------------------------------------
--- Copyright (c) 2014, Enzo Haussecker. All rights reserved. --
----------------------------------------------------------------
-
 {-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# OPTIONS -Wall              #-}
 
--- | A simple SMTP Client for sending Gmail.
+-- |
+-- Module      : Network.Mail.Client.Gmail
+-- Copyright   : Copyright (c) 2014, Enzo Haussecker. All rights reserved.
+-- License     : BSD3
+-- Maintainer  : Enzo Haussecker <ehaussecker@gmail.com>
+-- Stability   : Experimental
+-- Portability : Unknown
+--
+-- A simple SMTP Client for sending Gmail.
 module Network.Mail.Client.Gmail (sendGmail) where
 
 import Control.Monad (foldM_, forM)
@@ -55,37 +59,30 @@ sendGmail
    -> [FilePath]  -- ^ attachments
    -> IO ()
 sendGmail user pass from to cc bcc subject body attach = 
-   bracket (connectTo "smtp.gmail.com" $ PortNumber 587) hClose $ \hdl -> do
-     sys   <- makeSystem
-     ctx   <- contextNew hdl params sys
-     _MAIL <- renderMail from to cc bcc subject body attach
-     hSetBuffering hdl LineBuffering
-     ----------------------------
-     -- BEGIN MESSAGE EXCHANGE --
-     ----------------------------
-     sendSMTP  hdl "EHLO"       >> recvSMTP  hdl "220"
-                                >> recvSMTP  hdl "250"
-     sendSMTP  hdl "STARTTLS"   >> recvSMTP  hdl "220"
-     handshake ctx
-     sendSMTPS ctx "EHLO"       >> recvSMTPS ctx "250"
-     sendSMTPS ctx "AUTH LOGIN" >> recvSMTPS ctx "334"
-     sendSMTPS ctx _USERNAME    >> recvSMTPS ctx "334"
-     sendSMTPS ctx _PASSWORD    >> recvSMTPS ctx "235"
-     sendSMTPS ctx _FROM        >> recvSMTPS ctx "250"
-     sendSMTPS ctx _TO          >> recvSMTPS ctx "250"
-     sendSMTPS ctx "DATA"       >> recvSMTPS ctx "354"
-     sendSMTPS ctx _MAIL        >> recvSMTPS ctx "250"
-     sendSMTPS ctx "QUIT"       >> recvSMTPS ctx "221"
-     ----------------------------
-     --- END MESSAGE EXCHANGE ---
-     ----------------------------
-     bye ctx
-     contextClose ctx
-
-   where _USERNAME  = encode $ encodeUtf8 user
-         _PASSWORD  = encode $ encodeUtf8 pass
-         _FROM      = "MAIL FROM: " <> angleBracket [from]
-         _TO        = "RCPT TO: "   <> angleBracket (to ++ cc ++ bcc)
+   bracket (connectTo "smtp.gmail.com" $ PortNumber 587) hClose $ \ hdl -> do
+      sys   <- makeSystem
+      ctx   <- contextNew hdl params sys
+      _MAIL <- renderMail from to cc bcc subject body attach
+      hSetBuffering hdl LineBuffering
+      sendSMTP  hdl "EHLO"       >> recvSMTP  hdl "220"
+                                 >> recvSMTP  hdl "250"
+      sendSMTP  hdl "STARTTLS"   >> recvSMTP  hdl "220"
+      handshake ctx
+      sendSMTPS ctx "EHLO"       >> recvSMTPS ctx "250"
+      sendSMTPS ctx "AUTH LOGIN" >> recvSMTPS ctx "334"
+      sendSMTPS ctx _USERNAME    >> recvSMTPS ctx "334"
+      sendSMTPS ctx _PASSWORD    >> recvSMTPS ctx "235"
+      sendSMTPS ctx _FROM        >> recvSMTPS ctx "250"
+      sendSMTPS ctx _TO          >> recvSMTPS ctx "250"
+      sendSMTPS ctx "DATA"       >> recvSMTPS ctx "354"
+      sendSMTPS ctx _MAIL        >> recvSMTPS ctx "250"
+      sendSMTPS ctx "QUIT"       >> recvSMTPS ctx "221"
+      bye ctx
+      contextClose ctx
+      where _USERNAME  = encode $ encodeUtf8 user
+            _PASSWORD  = encode $ encodeUtf8 pass
+            _FROM      = "MAIL FROM: " <> angleBracket [from]
+            _TO        = "RCPT TO: "   <> angleBracket (to ++ cc ++ bcc)
 
 -- | Display the first email address in the given list using angle bracket formatting.
 angleBracket :: [Address] -> ByteString
