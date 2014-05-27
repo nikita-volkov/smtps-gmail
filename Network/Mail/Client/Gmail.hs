@@ -10,6 +10,7 @@
 module Network.Mail.Client.Gmail (sendGmail) where
 
 import Control.Monad (foldM_, forM)
+import Control.Exception (bracket)
 import Crypto.Random.AESCtr (makeSystem)
 import Data.ByteString.Char8 (lines, unpack)
 import Data.ByteString.Base64.Lazy (encode)
@@ -53,34 +54,34 @@ sendGmail
    -> Lazy.Text   -- ^ body
    -> [FilePath]  -- ^ attachments
    -> IO ()
-sendGmail user pass from to cc bcc subject body attach = do
-   hdl   <- connectTo "smtp.gmail.com" $ PortNumber 587
-   sys   <- makeSystem
-   ctx   <- contextNew hdl params sys
-   _MAIL <- renderMail from to cc bcc subject body attach
-   hSetBuffering hdl LineBuffering
-   ----------------------------
-   -- BEGIN MESSAGE EXCHANGE --
-   ----------------------------
-   sendSMTP  hdl "EHLO"       >> recvSMTP  hdl "220"
-                              >> recvSMTP  hdl "250"
-   sendSMTP  hdl "STARTTLS"   >> recvSMTP  hdl "220"
-   handshake ctx
-   sendSMTPS ctx "EHLO"       >> recvSMTPS ctx "250"
-   sendSMTPS ctx "AUTH LOGIN" >> recvSMTPS ctx "334"
-   sendSMTPS ctx _USERNAME    >> recvSMTPS ctx "334"
-   sendSMTPS ctx _PASSWORD    >> recvSMTPS ctx "235"
-   sendSMTPS ctx _FROM        >> recvSMTPS ctx "250"
-   sendSMTPS ctx _TO          >> recvSMTPS ctx "250"
-   sendSMTPS ctx "DATA"       >> recvSMTPS ctx "354"
-   sendSMTPS ctx _MAIL        >> recvSMTPS ctx "250"
-   sendSMTPS ctx "QUIT"       >> recvSMTPS ctx "221"
-   ----------------------------
-   --- END MESSAGE EXCHANGE ---
-   ----------------------------
-   bye ctx
-   contextClose ctx
-   hClose hdl
+sendGmail user pass from to cc bcc subject body attach = 
+   bracket (connectTo "smtp.gmail.com" $ PortNumber 587) hClose $ \hdl -> do
+     sys   <- makeSystem
+     ctx   <- contextNew hdl params sys
+     _MAIL <- renderMail from to cc bcc subject body attach
+     hSetBuffering hdl LineBuffering
+     ----------------------------
+     -- BEGIN MESSAGE EXCHANGE --
+     ----------------------------
+     sendSMTP  hdl "EHLO"       >> recvSMTP  hdl "220"
+                                >> recvSMTP  hdl "250"
+     sendSMTP  hdl "STARTTLS"   >> recvSMTP  hdl "220"
+     handshake ctx
+     sendSMTPS ctx "EHLO"       >> recvSMTPS ctx "250"
+     sendSMTPS ctx "AUTH LOGIN" >> recvSMTPS ctx "334"
+     sendSMTPS ctx _USERNAME    >> recvSMTPS ctx "334"
+     sendSMTPS ctx _PASSWORD    >> recvSMTPS ctx "235"
+     sendSMTPS ctx _FROM        >> recvSMTPS ctx "250"
+     sendSMTPS ctx _TO          >> recvSMTPS ctx "250"
+     sendSMTPS ctx "DATA"       >> recvSMTPS ctx "354"
+     sendSMTPS ctx _MAIL        >> recvSMTPS ctx "250"
+     sendSMTPS ctx "QUIT"       >> recvSMTPS ctx "221"
+     ----------------------------
+     --- END MESSAGE EXCHANGE ---
+     ----------------------------
+     bye ctx
+     contextClose ctx
+
    where _USERNAME  = encode $ encodeUtf8 user
          _PASSWORD  = encode $ encodeUtf8 pass
          _FROM      = "MAIL FROM: " <> angleBracket [from]
