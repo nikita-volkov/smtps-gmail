@@ -6,12 +6,17 @@
 -- Module      : Network.Mail.Client.Gmail
 -- Copyright   : Copyright (c) 2014, Enzo Haussecker. All rights reserved.
 -- License     : BSD3
--- Maintainer  : Enzo Haussecker <ehaussecker@gmail.com>
+-- Maintainer  : Enzo Haussecker
 -- Stability   : Experimental
 -- Portability : Unknown
 --
 -- A simple SMTP Client for sending Gmail.
-module Network.Mail.Client.Gmail (sendGmail) where
+module Network.Mail.Client.Gmail (
+
+ -- ** Sending
+       sendGmail
+
+     ) where
 
 import Control.Monad (foldM_, forM)
 import Control.Exception (bracket)
