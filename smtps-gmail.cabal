@@ -21,7 +21,7 @@ Library
                     base64-bytestring,
                     bytestring,
                     cprng-aes,
-                    data-default,
+                    data-default >= 0.5.3,
                     filepath,
                     mime-mail,
                     network,
