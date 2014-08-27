@@ -1,6 +1,7 @@
-{-# LANGUAGE LambdaCase        #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# OPTIONS -Wall              #-}
+{-# LANGUAGE LambdaCase                 #-}
+{-# LANGUAGE OverloadedStrings          #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# OPTIONS -Wall                       #-}
 
 -- |
 -- Module      : Network.Mail.Client.Gmail
@@ -18,12 +19,11 @@ module Network.Mail.Client.Gmail (
 
      ) where
 
-import Control.Monad (foldM_, forM)
 import Control.Exception (bracket)
+import Control.Monad.State
 import Crypto.Random.AESCtr (makeSystem)
-import Data.ByteString.Char8 (lines, unpack)
 import Data.ByteString.Base64.Lazy (encode)
-import Data.ByteString.Lazy.Char8 (ByteString, readFile)
+import Data.ByteString.Lazy.Char8 (ByteString, fromStrict, lines, readFile, unpack)
 import Data.ByteString.Lazy.Search (replace)
 import Data.Char (isDigit, isSpace)
 import Data.Default (def)
@@ -63,31 +63,40 @@ sendGmail
    -> Lazy.Text   -- ^ body
    -> [FilePath]  -- ^ attachments
    -> IO ()
-sendGmail user pass from to cc bcc subject body attach = 
+sendGmail user pass from to cc bcc subject body attach =
    bracket (connectTo "smtp.gmail.com" $ PortNumber 587) hClose $ \ hdl -> do
       sys   <- makeSystem
       ctx   <- contextNew hdl params sys
-      _MAIL <- renderMail from to cc bcc subject body attach
       hSetBuffering hdl LineBuffering
       sendSMTP  hdl "EHLO"       >> recvSMTP  hdl "220"
                                  >> recvSMTP  hdl "250"
       sendSMTP  hdl "STARTTLS"   >> recvSMTP  hdl "220"
       handshake ctx
-      sendSMTPS ctx "EHLO"       >> recvSMTPS ctx "250"
-      sendSMTPS ctx "AUTH LOGIN" >> recvSMTPS ctx "334"
-      sendSMTPS ctx _USERNAME    >> recvSMTPS ctx "334"
-      sendSMTPS ctx _PASSWORD    >> recvSMTPS ctx "235"
-      sendSMTPS ctx _FROM        >> recvSMTPS ctx "250"
-      sendSMTPS ctx _TO          >> recvSMTPS ctx "250"
-      sendSMTPS ctx "DATA"       >> recvSMTPS ctx "354"
-      sendSMTPS ctx _MAIL        >> recvSMTPS ctx "250"
-      sendSMTPS ctx "QUIT"       >> recvSMTPS ctx "221"
+      _ <- runSMTPSState (exchangeSMTPS ctx) []
       bye ctx
       contextClose ctx
       where _USERNAME  = encode $ encodeUtf8 user
             _PASSWORD  = encode $ encodeUtf8 pass
             _FROM      = "MAIL FROM: " <> angleBracket [from]
             _TO        = "RCPT TO: "   <> angleBracket (to ++ cc ++ bcc)
+            exchangeSMTPS :: Context -> SMTPSState ()
+            exchangeSMTPS ctx = do
+                _MAIL <- liftIO $ renderMail from to cc bcc subject body attach
+                sendSMTPS ctx "EHLO"       >> recvSMTPS ctx "250" -- 250-mx.google.com at your service, [78.249.57.166]
+                                           >> recvSMTPS ctx "250" -- 250-SIZE 35882577
+                                           >> recvSMTPS ctx "250" -- 250-8BITMIME
+                                           >> recvSMTPS ctx "250" -- 250-AUTH LOGIN PLAIN XOAUTH XOAUTH2 PLAIN-CLIENTTOKEN
+                                           >> recvSMTPS ctx "250" -- 250-ENHANCEDSTATUSCODES
+                                           >> recvSMTPS ctx "250" -- 250 CHUNKING
+                                           >> recvSMTPS ctx "250" -- 250 SMTPUTF8
+                sendSMTPS ctx "AUTH LOGIN" >> recvSMTPS ctx "334"
+                sendSMTPS ctx _USERNAME    >> recvSMTPS ctx "334"
+                sendSMTPS ctx _PASSWORD    >> recvSMTPS ctx "235"
+                sendSMTPS ctx _FROM        >> recvSMTPS ctx "250"
+                sendSMTPS ctx _TO          >> recvSMTPS ctx "250"
+                sendSMTPS ctx "DATA"       >> recvSMTPS ctx "354"
+                sendSMTPS ctx _MAIL        >> recvSMTPS ctx "250"
+                sendSMTPS ctx "QUIT"       >> recvSMTPS ctx "221"
 
 -- | Display the first email address in the given list using angle bracket formatting.
 angleBracket :: [Address] -> ByteString
@@ -107,7 +116,7 @@ renderMail from to cc bcc subject body attach = do
    parts <- forM attach $ \ path -> do
       content <- readFile path
       let mime = getMime $ takeExtension path
-          file = Just . pack $ takeFileName path
+          file = Just . Strict.pack $ takeFileName path
       return $! [Part mime Base64 file [] content]
    let plain = [Part "text/plain; charset=utf-8" QuotedPrintableText Nothing [] $ encodeUtf8 body]
    mail <- renderMail' . Mail from to cc bcc headers $ plain : parts
@@ -123,14 +132,38 @@ recvSMTP :: Handle -> String -> IO ()
 recvSMTP hdl code = go [] >> return ()
    where go accum = hGetLine hdl >>= \ reply -> match code reply go accum
 
+-- | STMPS actions are stateful computations, stacked on top of the IO monad.
+newtype SMTPSState a = S (StateT [ByteString] IO a)
+    deriving ( Monad
+             , MonadState [ByteString]
+             , MonadIO
+             )
+
+-- | escape the SMTPSState monad, back in the IO monad.
+runSMTPSState :: SMTPSState a -> [ByteString] -> IO (a, [ByteString])
+runSMTPSState (S s) = runStateT s
+
 -- | Send an encrypted message using the simple message transfer protocol.
-sendSMTPS :: Context -> ByteString -> IO ()
+sendSMTPS :: Context -> ByteString -> SMTPSState ()
 sendSMTPS ctx msg = sendData ctx $ msg <> "\r\n"
 
 -- | Receive an encrypted message using the simple message transfer protocol.
-recvSMTPS :: Context -> String -> IO ()
-recvSMTPS ctx code = recvData ctx >>= foldM_ step [] . lines
-   where step accum reply = match code (unpack reply) return accum
+recvSMTPS :: Context -> String -> SMTPSState ()
+recvSMTPS ctx code = do
+    -- fetch the current state
+    s <- get
+
+    -- ask for new data from the server only if there are no more data in the
+    -- current state
+    xs <- case s of [] -> fromStrict `liftM` recvData ctx
+                    _  -> return ""
+
+    -- process the first message line
+    let (answer:newstate) = (s ++ lines xs)
+    _ <- liftIO $ match code (unpack answer) return []
+
+    -- record the new state
+    put newstate
 
 -- | A convenient type synonym.
 type Continuation = [String] -> IO [String]
@@ -170,7 +203,7 @@ mismatch code other replies = fail $
              step accum = flip (++) $ "; " ++ accum
 
 -- | TLS client parameters.
-params :: ClientParams 
+params :: ClientParams
 params = (defaultParamsClient "smtp.gmail.com" "587")
    { clientSupported  = def { supportedCiphers      = ciphersuite_all }
    , clientShared     = def { sharedValidationCache = noValidate      }
