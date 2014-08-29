@@ -159,48 +159,47 @@ recvSMTPS ctx code = do
                     _  -> return ""
 
     -- process the first message line
-    let (answer:newstate) = (s ++ lines xs)
-    _ <- liftIO $ match code (unpack answer) return []
+    let (reply:newstate) = (s ++ lines xs)
+    liftIO $ match code (unpack reply)
 
     -- record the new state
     put newstate
 
--- | A convenient type synonym.
-type Continuation = [String] -> IO [String]
 
 -- | Match reply codes and perform continuation, termination, and failure case analysis.
 match
-   :: String       -- ^ expected reply code
-   -> String       -- ^ actual reply code
-   -> Continuation -- ^ continuation
-   -> [String]     -- ^ accumulator
-   -> IO [String]
-match code reply go accum =
-   if not (null suffix) && head suffix == '-'
-   then go $ drop 1 suffix:accum
-   else if prefix == code && "" /= code
-        then return []
-        else mismatch code prefix $ suffix:accum
-        where (prefix, suffix) = break (not . isDigit) reply
+   :: String -- ^ expected reply code
+   -> String -- ^ actual reply code
+   -> IO ()
+match e r = match' e r (return ()) (mismatch e r)
+
+-- | Match reply codes and perform continuation, termination, and failure case analysis.
+match'
+   :: String -- ^ expected reply code
+   -> String -- ^ actual reply code
+   -> IO a  -- ^ continuation action
+   -> IO a  -- ^ failure action
+   -> IO a
+match' expected reply continuation failure = do
+    case prefix == expected && "" /= expected of
+        True -> continuation
+        False -> failure
+  where (prefixWords, _) = break isSpace reply
+        (prefixCode, _) = break (not . isDigit) reply
+        prefix = case elem '-' expected of
+                   True  -> prefixWords
+                   False -> prefixCode
 
 -- | Raise an exception for mismatched reply codes.
 mismatch
    :: String   -- ^ expected reply code
    -> String   -- ^ actual reply code
-   -> [String] -- ^ messages
-   -> IO [String]
-mismatch code other replies = fail $
-   if null code
-   then "mismatch: missing expected reply code."
-   else "mismatch: expected reply code " ++ code ++
-    (if null other
-     then ", but no reply code was received"
-     else ", but received reply code " ++ other) ++
-     case filter (not . null) $ map strip replies of
-       []     -> "."
-       (r:rs) -> ": " ++ foldl step (strip r) rs ++ "."
-       where strip = dropWhile isSpace . filter (/='\r')
-             step accum = flip (++) $ "; " ++ accum
+   -> IO ()
+mismatch expected reply = fail msg
+  where msg = if null expected
+              then "mismatch: missing expected reply code."
+              else "mismatch: expected reply code \"" ++ expected
+                   ++ "\", but received reply code \"" ++ reply ++ "\""
 
 -- | TLS client parameters.
 params :: ClientParams
