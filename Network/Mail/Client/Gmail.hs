@@ -154,6 +154,18 @@ sendSMTP hdl xs = liftIO $ hPutStrLn hdl xs
 recvSMTP :: Handle -> String -> SMTPState ()
 recvSMTP hdl = recv (fromStrict `liftM` hGetLine hdl)
 
+-- | Send an encrypted message using the simple message transfer protocol.
+sendSMTPS :: Context -> ByteString -> SMTPState ()
+sendSMTPS ctx msg = sendData ctx $ msg <> "\r\n"
+
+-- | Receive an encrypted message using the simple message transfer protocol.
+recvSMTPS :: Context -> String -> SMTPState ()
+recvSMTPS ctx = recv $ fromStrict `liftM` recvData ctx
+
+-- | Similar to recvSMTPS. In case of mitmatch, do not fail and leave the current SMTPS state as is.
+recvOptionalSMTPS :: Context -> String -> SMTPState ()
+recvOptionalSMTPS ctx = recvOptional (fromStrict `liftM` recvData ctx)
+
 -- | Receive a SMTP message
 recv :: (IO ByteString) -> String -> SMTPState ()
 recv reply expected = do
@@ -171,18 +183,6 @@ recv reply expected = do
 
     -- record the new state
     put newstate
-
--- | Send an encrypted message using the simple message transfer protocol.
-sendSMTPS :: Context -> ByteString -> SMTPState ()
-sendSMTPS ctx msg = sendData ctx $ msg <> "\r\n"
-
--- | Receive an encrypted message using the simple message transfer protocol.
-recvSMTPS :: Context -> String -> SMTPState ()
-recvSMTPS ctx = recv $ fromStrict `liftM` recvData ctx
-
--- | Similar to recvSMTPS. In case of mitmatch, do not fail and leave the current SMTPS state as is.
-recvOptionalSMTPS :: Context -> String -> SMTPState ()
-recvOptionalSMTPS ctx = recvOptional (fromStrict `liftM` recvData ctx)
 
 -- | Similar to recv. In case of mitmatch, do not fail and leave the current SMTPS state as is.
 recvOptional :: (IO ByteString) -> String -> SMTPState ()
