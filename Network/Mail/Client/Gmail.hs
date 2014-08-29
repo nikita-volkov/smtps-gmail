@@ -25,6 +25,7 @@ import Crypto.Random.AESCtr (makeSystem)
 import Data.ByteString.Base64.Lazy (encode)
 import Data.ByteString.Lazy.Char8 (ByteString, fromStrict, lines, readFile, unpack)
 import Data.ByteString.Lazy.Search (replace)
+import Data.ByteString.Char8 (hGetLine)
 import Data.Char (isDigit, isSpace)
 import Data.Default (def)
 import Data.Monoid ((<>))
@@ -37,7 +38,7 @@ import Network.TLS
 import Network.TLS.Extra
 import Prelude hiding (any, lines, readFile)
 import System.FilePath (takeExtension, takeFileName)
-import System.IO hiding (readFile)
+import System.IO hiding (hGetLine, readFile)
 
 -- | Send an email from your Gmail account using the
 --   simple message transfer protocol with transport
@@ -68,9 +69,7 @@ sendGmail user pass from to cc bcc subject body attach =
       sys   <- makeSystem
       ctx   <- contextNew hdl params sys
       hSetBuffering hdl LineBuffering
-      sendSMTP  hdl "EHLO"       >> recvSMTP  hdl "220"
-                                 >> recvSMTP  hdl "250"
-      sendSMTP  hdl "STARTTLS"   >> recvSMTP  hdl "220"
+      _ <- runSMTPState (exchangeSMTP hdl) []
       handshake ctx
       _ <- runSMTPState (exchangeSMTPS ctx) []
       bye ctx
@@ -79,6 +78,18 @@ sendGmail user pass from to cc bcc subject body attach =
             _PASSWORD  = encode $ encodeUtf8 pass
             _FROM      = "MAIL FROM: " <> angleBracket [from]
             _TO        = "RCPT TO: "   <> angleBracket (to ++ cc ++ bcc)
+            exchangeSMTP :: Handle -> SMTPState ()
+            exchangeSMTP hdl = do
+                sendSMTP  hdl "EHLO"     >> recvSMTP hdl "220"
+                                         >> recvSMTP hdl "250" -- mx.google.com
+                                         >> recvSMTP hdl "250-SIZE"
+                                         >> recvSMTP hdl "250-8BITMIME"
+                                         >> recvSMTP hdl "250-STARTTLS"
+                                         >> recvSMTP hdl "250" -- AUTH | ENHANCEDSTATUSCODES
+                                         >> recvSMTP hdl "250" -- ENHANCEDSTATUSCODES | AUTH
+                                         >> recvSMTP hdl "250-CHUNKING"
+                                         >> recvSMTP hdl "250" -- SMTPUTF8
+                sendSMTP  hdl "STARTTLS" >> recvSMTP hdl "220"
             exchangeSMTPS :: Context -> SMTPState ()
             exchangeSMTPS ctx = do
                 _MAIL <- liftIO $ renderMail from to cc bcc subject body attach
@@ -123,15 +134,6 @@ renderMail from to cc bcc subject body attach = do
    return $! replace "\n." ("\n.."::ByteString) mail <> "\r\n.\r\n"
    where headers = [("Subject",subject)]
 
--- | Send an unencrypted message using the simple message transfer protocol.
-sendSMTP :: Handle -> String -> IO ()
-sendSMTP = hPutStrLn
-
--- | Receive an unencrypted message using the simple message transfer protocol.
-recvSMTP :: Handle -> String -> IO ()
-recvSMTP hdl code = go [] >> return ()
-   where go accum = hGetLine hdl >>= \ reply -> match code reply go accum
-
 -- | STMP actions are stateful computations, stacked on top of the IO monad.
 newtype SMTPState a = S (StateT [ByteString] IO a)
     deriving ( Monad
@@ -142,6 +144,28 @@ newtype SMTPState a = S (StateT [ByteString] IO a)
 -- | escape the SMTPState monad, back in the IO monad.
 runSMTPState :: SMTPState a -> [ByteString] -> IO (a, [ByteString])
 runSMTPState (S s) = runStateT s
+
+-- | Send an unencrypted message using the simple message transfer protocol.
+sendSMTP :: Handle -> String -> SMTPState ()
+sendSMTP hdl xs = liftIO $ hPutStrLn hdl xs
+
+-- | Receive an unencrypted message using the simple message transfer protocol.
+recvSMTP :: Handle -> String -> SMTPState ()
+recvSMTP hdl expected = do
+    s <- get
+
+    -- ask for new data from the server only if there are no more data in the
+    -- current state
+    xs <- case s of [] -> liftIO $ fromStrict `liftM` hGetLine hdl
+                    _  -> return ""
+
+    -- process the first message line
+    let (reply:newstate) = (s ++ lines xs)
+
+    liftIO $ match expected (unpack reply)
+
+    -- record the new state
+    put newstate
 
 -- | Send an encrypted message using the simple message transfer protocol.
 sendSMTPS :: Context -> ByteString -> SMTPState ()
