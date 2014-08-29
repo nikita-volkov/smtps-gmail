@@ -150,20 +150,24 @@ runSMTPState (S s) = runStateT s
 sendSMTP :: Handle -> String -> SMTPState ()
 sendSMTP hdl xs = liftIO $ hPutStrLn hdl xs
 
--- | Receive an unencrypted message using the simple message transfer protocol.
+-- | Receive a message using the simple message transfer protocol.
 recvSMTP :: Handle -> String -> SMTPState ()
-recvSMTP hdl expected = do
+recvSMTP hdl = recv (fromStrict `liftM` hGetLine hdl)
+
+-- | Receive a SMTP message
+recv :: (IO ByteString) -> String -> SMTPState ()
+recv reply expected = do
     s <- get
 
     -- ask for new data from the server only if there are no more data in the
     -- current state
-    xs <- case s of [] -> liftIO $ fromStrict `liftM` hGetLine hdl
+    xs <- case s of [] -> liftIO $ reply
                     _  -> return ""
 
     -- process the first message line
-    let (reply:newstate) = (s ++ lines xs)
+    let (reply':newstate) = (s ++ lines xs)
 
-    liftIO $ match expected (unpack reply)
+    liftIO $ match expected (unpack reply')
 
     -- record the new state
     put newstate
@@ -174,36 +178,26 @@ sendSMTPS ctx msg = sendData ctx $ msg <> "\r\n"
 
 -- | Receive an encrypted message using the simple message transfer protocol.
 recvSMTPS :: Context -> String -> SMTPState ()
-recvSMTPS ctx code = do
-    -- fetch the current state
-    s <- get
-
-    -- ask for new data from the server only if there are no more data in the
-    -- current state
-    xs <- case s of [] -> fromStrict `liftM` recvData ctx
-                    _  -> return ""
-
-    -- process the first message line
-    let (reply:newstate) = (s ++ lines xs)
-    liftIO $ match code (unpack reply)
-
-    -- record the new state
-    put newstate
+recvSMTPS ctx = recv $ fromStrict `liftM` recvData ctx
 
 -- | Similar to recvSMTPS. In case of mitmatch, do not fail and leave the current SMTPS state as is.
 recvOptionalSMTPS :: Context -> String -> SMTPState ()
-recvOptionalSMTPS ctx code = do
+recvOptionalSMTPS ctx = recvOptional (fromStrict `liftM` recvData ctx)
+
+-- | Similar to recv. In case of mitmatch, do not fail and leave the current SMTPS state as is.
+recvOptional :: (IO ByteString) -> String -> SMTPState ()
+recvOptional reply code = do
     -- fetch the current state
     s <- get
 
     -- ask for new data from the server only if there are no more data in the
     -- current state
-    xs <- case s of [] -> fromStrict `liftM` recvData ctx
+    xs <- case s of [] -> liftIO reply
                     _  -> return ""
 
     -- process the first message line
-    let (reply:newstate) = (s ++ lines xs)
-    m <- liftIO $ match' code (unpack reply) (return True) (return False)
+    let (reply':newstate) = (s ++ lines xs)
+    m <- liftIO $ match' code (unpack reply') (return True) (return False)
     case m of
         True -> put newstate
         False -> return () -- reply not processed, do not modify the SMTP state
