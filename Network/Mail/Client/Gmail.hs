@@ -72,14 +72,14 @@ sendGmail user pass from to cc bcc subject body attach =
                                  >> recvSMTP  hdl "250"
       sendSMTP  hdl "STARTTLS"   >> recvSMTP  hdl "220"
       handshake ctx
-      _ <- runSMTPSState (exchangeSMTPS ctx) []
+      _ <- runSMTPState (exchangeSMTPS ctx) []
       bye ctx
       contextClose ctx
       where _USERNAME  = encode $ encodeUtf8 user
             _PASSWORD  = encode $ encodeUtf8 pass
             _FROM      = "MAIL FROM: " <> angleBracket [from]
             _TO        = "RCPT TO: "   <> angleBracket (to ++ cc ++ bcc)
-            exchangeSMTPS :: Context -> SMTPSState ()
+            exchangeSMTPS :: Context -> SMTPState ()
             exchangeSMTPS ctx = do
                 _MAIL <- liftIO $ renderMail from to cc bcc subject body attach
                 sendSMTPS ctx "EHLO"       >> recvSMTPS ctx "250" -- 250-mx.google.com at your service, [78.249.57.166]
@@ -132,23 +132,23 @@ recvSMTP :: Handle -> String -> IO ()
 recvSMTP hdl code = go [] >> return ()
    where go accum = hGetLine hdl >>= \ reply -> match code reply go accum
 
--- | STMPS actions are stateful computations, stacked on top of the IO monad.
-newtype SMTPSState a = S (StateT [ByteString] IO a)
+-- | STMP actions are stateful computations, stacked on top of the IO monad.
+newtype SMTPState a = S (StateT [ByteString] IO a)
     deriving ( Monad
              , MonadState [ByteString]
              , MonadIO
              )
 
--- | escape the SMTPSState monad, back in the IO monad.
-runSMTPSState :: SMTPSState a -> [ByteString] -> IO (a, [ByteString])
-runSMTPSState (S s) = runStateT s
+-- | escape the SMTPState monad, back in the IO monad.
+runSMTPState :: SMTPState a -> [ByteString] -> IO (a, [ByteString])
+runSMTPState (S s) = runStateT s
 
 -- | Send an encrypted message using the simple message transfer protocol.
-sendSMTPS :: Context -> ByteString -> SMTPSState ()
+sendSMTPS :: Context -> ByteString -> SMTPState ()
 sendSMTPS ctx msg = sendData ctx $ msg <> "\r\n"
 
 -- | Receive an encrypted message using the simple message transfer protocol.
-recvSMTPS :: Context -> String -> SMTPSState ()
+recvSMTPS :: Context -> String -> SMTPState ()
 recvSMTPS ctx code = do
     -- fetch the current state
     s <- get
