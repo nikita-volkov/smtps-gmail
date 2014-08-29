@@ -93,13 +93,14 @@ sendGmail user pass from to cc bcc subject body attach =
             exchangeSMTPS :: Context -> SMTPState ()
             exchangeSMTPS ctx = do
                 _MAIL <- liftIO $ renderMail from to cc bcc subject body attach
-                sendSMTPS ctx "EHLO"       >> recvSMTPS ctx "250" -- 250-mx.google.com at your service, [78.249.57.166]
-                                           >> recvSMTPS ctx "250" -- 250-SIZE 35882577
-                                           >> recvSMTPS ctx "250" -- 250-8BITMIME
-                                           >> recvSMTPS ctx "250" -- 250-AUTH LOGIN PLAIN XOAUTH XOAUTH2 PLAIN-CLIENTTOKEN
-                                           >> recvSMTPS ctx "250" -- 250-ENHANCEDSTATUSCODES
-                                           >> recvSMTPS ctx "250" -- 250 CHUNKING
-                                           >> recvSMTPS ctx "250" -- 250 SMTPUTF8
+                sendSMTPS ctx "EHLO"       >> recvSMTPS ctx "250" -- mx.google.com
+                                           >> recvSMTPS ctx "250-SIZE"
+                                           >> recvSMTPS ctx "250-8BITMIME"
+                                           >> recvSMTPS ctx "250-AUTH"
+                                           >> recvSMTPS ctx "250-ENHANCEDSTATUSCODES"
+                                           >> recvOptionalSMTPS ctx "250-PIPELINING"
+                                           >> recvSMTPS ctx "250-CHUNKING"
+                                           >> recvSMTPS ctx "250" -- SMTPUTF8
                 sendSMTPS ctx "AUTH LOGIN" >> recvSMTPS ctx "334"
                 sendSMTPS ctx _USERNAME    >> recvSMTPS ctx "334"
                 sendSMTPS ctx _PASSWORD    >> recvSMTPS ctx "235"
@@ -189,6 +190,23 @@ recvSMTPS ctx code = do
     -- record the new state
     put newstate
 
+-- | Similar to recvSMTPS. In case of mitmatch, do not fail and leave the current SMTPS state as is.
+recvOptionalSMTPS :: Context -> String -> SMTPState ()
+recvOptionalSMTPS ctx code = do
+    -- fetch the current state
+    s <- get
+
+    -- ask for new data from the server only if there are no more data in the
+    -- current state
+    xs <- case s of [] -> fromStrict `liftM` recvData ctx
+                    _  -> return ""
+
+    -- process the first message line
+    let (reply:newstate) = (s ++ lines xs)
+    m <- liftIO $ match' code (unpack reply) (return True) (return False)
+    case m of
+        True -> put newstate
+        False -> return () -- reply not processed, do not modify the SMTP state
 
 -- | Match reply codes and perform continuation, termination, and failure case analysis.
 match
