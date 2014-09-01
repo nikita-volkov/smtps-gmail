@@ -162,7 +162,7 @@ sendSMTPS ctx msg = sendData ctx $ msg <> "\r\n"
 recvSMTPS :: Context -> String -> SMTPState ()
 recvSMTPS ctx = recv $ fromStrict `liftM` recvData ctx
 
--- | Similar to recvSMTPS. In case of mitmatch, do not fail and leave the current SMTPS state as is.
+-- | Similar to recvSMTPS. In case of mismatch, do not fail and leave the current SMTPS state as is.
 recvOptionalSMTPS :: Context -> String -> SMTPState ()
 recvOptionalSMTPS ctx = recvOptional (fromStrict `liftM` recvData ctx)
 
@@ -184,7 +184,7 @@ recv reply expected = do
     -- record the new state
     put newstate
 
--- | Similar to recv. In case of mitmatch, do not fail and leave the current SMTPS state as is.
+-- | Similar to recv. In case of mismatch, do not fail and leave the current SMTPS state as is.
 recvOptional :: (IO ByteString) -> String -> SMTPState ()
 recvOptional reply code = do
     -- fetch the current state
