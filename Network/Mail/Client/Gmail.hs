@@ -25,6 +25,7 @@ import Crypto.Random.AESCtr (makeSystem)
 import Data.ByteString.Base64.Lazy (encode)
 import Data.ByteString.Lazy.Char8 (ByteString, fromStrict, lines, readFile, unpack)
 import Data.ByteString.Lazy.Search (replace)
+import Data.ByteString.Char8 (hGetLine)
 import Data.Char (isDigit, isSpace)
 import Data.Default (def)
 import Data.Monoid ((<>))
@@ -37,7 +38,7 @@ import Network.TLS
 import Network.TLS.Extra
 import Prelude hiding (any, lines, readFile)
 import System.FilePath (takeExtension, takeFileName)
-import System.IO hiding (readFile)
+import System.IO hiding (hGetLine, readFile)
 
 -- | Send an email from your Gmail account using the
 --   simple message transfer protocol with transport
@@ -68,27 +69,38 @@ sendGmail user pass from to cc bcc subject body attach =
       sys   <- makeSystem
       ctx   <- contextNew hdl params sys
       hSetBuffering hdl LineBuffering
-      sendSMTP  hdl "EHLO"       >> recvSMTP  hdl "220"
-                                 >> recvSMTP  hdl "250"
-      sendSMTP  hdl "STARTTLS"   >> recvSMTP  hdl "220"
+      _ <- runSMTPState (exchangeSMTP hdl) []
       handshake ctx
-      _ <- runSMTPSState (exchangeSMTPS ctx) []
+      _ <- runSMTPState (exchangeSMTPS ctx) []
       bye ctx
       contextClose ctx
       where _USERNAME  = encode $ encodeUtf8 user
             _PASSWORD  = encode $ encodeUtf8 pass
             _FROM      = "MAIL FROM: " <> angleBracket [from]
             _TO        = "RCPT TO: "   <> angleBracket (to ++ cc ++ bcc)
-            exchangeSMTPS :: Context -> SMTPSState ()
+            exchangeSMTP :: Handle -> SMTPState ()
+            exchangeSMTP hdl = do
+                sendSMTP  hdl "EHLO"     >> recvSMTP hdl "220"
+                                         >> recvSMTP hdl "250" -- mx.google.com
+                                         >> recvSMTP hdl "250-SIZE"
+                                         >> recvSMTP hdl "250-8BITMIME"
+                                         >> recvSMTP hdl "250-STARTTLS"
+                                         >> recvSMTP hdl "250" -- AUTH | ENHANCEDSTATUSCODES
+                                         >> recvSMTP hdl "250" -- ENHANCEDSTATUSCODES | AUTH
+                                         >> recvSMTP hdl "250-CHUNKING"
+                                         >> recvSMTP hdl "250" -- SMTPUTF8
+                sendSMTP  hdl "STARTTLS" >> recvSMTP hdl "220"
+            exchangeSMTPS :: Context -> SMTPState ()
             exchangeSMTPS ctx = do
                 _MAIL <- liftIO $ renderMail from to cc bcc subject body attach
-                sendSMTPS ctx "EHLO"       >> recvSMTPS ctx "250" -- 250-mx.google.com at your service, [78.249.57.166]
-                                           >> recvSMTPS ctx "250" -- 250-SIZE 35882577
-                                           >> recvSMTPS ctx "250" -- 250-8BITMIME
-                                           >> recvSMTPS ctx "250" -- 250-AUTH LOGIN PLAIN XOAUTH XOAUTH2 PLAIN-CLIENTTOKEN
-                                           >> recvSMTPS ctx "250" -- 250-ENHANCEDSTATUSCODES
-                                           >> recvSMTPS ctx "250" -- 250 CHUNKING
-                                           >> recvSMTPS ctx "250" -- 250 SMTPUTF8
+                sendSMTPS ctx "EHLO"       >> recvSMTPS ctx "250" -- mx.google.com
+                                           >> recvSMTPS ctx "250-SIZE"
+                                           >> recvSMTPS ctx "250-8BITMIME"
+                                           >> recvSMTPS ctx "250-AUTH"
+                                           >> recvSMTPS ctx "250-ENHANCEDSTATUSCODES"
+                                           >> recvOptionalSMTPS ctx "250-PIPELINING"
+                                           >> recvSMTPS ctx "250-CHUNKING"
+                                           >> recvSMTPS ctx "250" -- SMTPUTF8
                 sendSMTPS ctx "AUTH LOGIN" >> recvSMTPS ctx "334"
                 sendSMTPS ctx _USERNAME    >> recvSMTPS ctx "334"
                 sendSMTPS ctx _PASSWORD    >> recvSMTPS ctx "235"
@@ -123,84 +135,107 @@ renderMail from to cc bcc subject body attach = do
    return $! replace "\n." ("\n.."::ByteString) mail <> "\r\n.\r\n"
    where headers = [("Subject",subject)]
 
--- | Send an unencrypted message using the simple message transfer protocol.
-sendSMTP :: Handle -> String -> IO ()
-sendSMTP = hPutStrLn
-
--- | Receive an unencrypted message using the simple message transfer protocol.
-recvSMTP :: Handle -> String -> IO ()
-recvSMTP hdl code = go [] >> return ()
-   where go accum = hGetLine hdl >>= \ reply -> match code reply go accum
-
--- | STMPS actions are stateful computations, stacked on top of the IO monad.
-newtype SMTPSState a = S (StateT [ByteString] IO a)
+-- | STMP actions are stateful computations, stacked on top of the IO monad.
+newtype SMTPState a = S (StateT [ByteString] IO a)
     deriving ( Monad
              , MonadState [ByteString]
              , MonadIO
              )
 
--- | escape the SMTPSState monad, back in the IO monad.
-runSMTPSState :: SMTPSState a -> [ByteString] -> IO (a, [ByteString])
-runSMTPSState (S s) = runStateT s
+-- | escape the SMTPState monad, back in the IO monad.
+runSMTPState :: SMTPState a -> [ByteString] -> IO (a, [ByteString])
+runSMTPState (S s) = runStateT s
+
+-- | Send an unencrypted message using the simple message transfer protocol.
+sendSMTP :: Handle -> String -> SMTPState ()
+sendSMTP hdl xs = liftIO $ hPutStrLn hdl xs
+
+-- | Receive a message using the simple message transfer protocol.
+recvSMTP :: Handle -> String -> SMTPState ()
+recvSMTP hdl = recv (fromStrict `liftM` hGetLine hdl)
 
 -- | Send an encrypted message using the simple message transfer protocol.
-sendSMTPS :: Context -> ByteString -> SMTPSState ()
+sendSMTPS :: Context -> ByteString -> SMTPState ()
 sendSMTPS ctx msg = sendData ctx $ msg <> "\r\n"
 
 -- | Receive an encrypted message using the simple message transfer protocol.
-recvSMTPS :: Context -> String -> SMTPSState ()
-recvSMTPS ctx code = do
+recvSMTPS :: Context -> String -> SMTPState ()
+recvSMTPS ctx = recv $ fromStrict `liftM` recvData ctx
+
+-- | Similar to recvSMTPS. In case of mismatch, do not fail and leave the current SMTPS state as is.
+recvOptionalSMTPS :: Context -> String -> SMTPState ()
+recvOptionalSMTPS ctx = recvOptional (fromStrict `liftM` recvData ctx)
+
+-- | Receive a SMTP message
+recv :: (IO ByteString) -> String -> SMTPState ()
+recv reply expected = do
+    s <- get
+
+    -- ask for new data from the server only if there are no more data in the
+    -- current state
+    xs <- case s of [] -> liftIO $ reply
+                    _  -> return ""
+
+    -- process the first message line
+    let (reply':newstate) = (s ++ lines xs)
+
+    liftIO $ match expected (unpack reply')
+
+    -- record the new state
+    put newstate
+
+-- | Similar to recv. In case of mismatch, do not fail and leave the current SMTPS state as is.
+recvOptional :: (IO ByteString) -> String -> SMTPState ()
+recvOptional reply code = do
     -- fetch the current state
     s <- get
 
     -- ask for new data from the server only if there are no more data in the
     -- current state
-    xs <- case s of [] -> fromStrict `liftM` recvData ctx
+    xs <- case s of [] -> liftIO reply
                     _  -> return ""
 
     -- process the first message line
-    let (answer:newstate) = (s ++ lines xs)
-    _ <- liftIO $ match code (unpack answer) return []
-
-    -- record the new state
-    put newstate
-
--- | A convenient type synonym.
-type Continuation = [String] -> IO [String]
+    let (reply':newstate) = (s ++ lines xs)
+    m <- liftIO $ match' code (unpack reply') (return True) (return False)
+    case m of
+        True -> put newstate
+        False -> return () -- reply not processed, do not modify the SMTP state
 
 -- | Match reply codes and perform continuation, termination, and failure case analysis.
 match
-   :: String       -- ^ expected reply code
-   -> String       -- ^ actual reply code
-   -> Continuation -- ^ continuation
-   -> [String]     -- ^ accumulator
-   -> IO [String]
-match code reply go accum =
-   if not (null suffix) && head suffix == '-'
-   then go $ drop 1 suffix:accum
-   else if prefix == code && "" /= code
-        then return []
-        else mismatch code prefix $ suffix:accum
-        where (prefix, suffix) = break (not . isDigit) reply
+   :: String -- ^ expected reply code
+   -> String -- ^ actual reply code
+   -> IO ()
+match e r = match' e r (return ()) (mismatch e r)
+
+-- | Match reply codes and perform continuation, termination, and failure case analysis.
+match'
+   :: String -- ^ expected reply code
+   -> String -- ^ actual reply code
+   -> IO a  -- ^ continuation action
+   -> IO a  -- ^ failure action
+   -> IO a
+match' expected reply continuation failure = do
+    case prefix == expected && "" /= expected of
+        True -> continuation
+        False -> failure
+  where (prefixWords, _) = break isSpace reply
+        (prefixCode, _) = break (not . isDigit) reply
+        prefix = case elem '-' expected of
+                   True  -> prefixWords
+                   False -> prefixCode
 
 -- | Raise an exception for mismatched reply codes.
 mismatch
    :: String   -- ^ expected reply code
    -> String   -- ^ actual reply code
-   -> [String] -- ^ messages
-   -> IO [String]
-mismatch code other replies = fail $
-   if null code
-   then "mismatch: missing expected reply code."
-   else "mismatch: expected reply code " ++ code ++
-    (if null other
-     then ", but no reply code was received"
-     else ", but received reply code " ++ other) ++
-     case filter (not . null) $ map strip replies of
-       []     -> "."
-       (r:rs) -> ": " ++ foldl step (strip r) rs ++ "."
-       where strip = dropWhile isSpace . filter (/='\r')
-             step accum = flip (++) $ "; " ++ accum
+   -> IO ()
+mismatch expected reply = fail msg
+  where msg = if null expected
+              then "mismatch: missing expected reply code."
+              else "mismatch: expected reply code \"" ++ expected
+                   ++ "\", but received reply code \"" ++ reply ++ "\""
 
 -- | TLS client parameters.
 params :: ClientParams
