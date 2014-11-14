@@ -1,184 +1,211 @@
-{-# LANGUAGE LambdaCase        #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# OPTIONS -Wall              #-}
+{-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE LambdaCase         #-}
+{-# LANGUAGE OverloadedStrings  #-}
+{-# OPTIONS -Wall               #-}
 
 -- |
 -- Module      : Network.Mail.Client.Gmail
--- Copyright   : Copyright (c) 2014, Enzo Haussecker. All rights reserved.
 -- License     : BSD3
 -- Maintainer  : Enzo Haussecker
 -- Stability   : Experimental
 -- Portability : Unknown
 --
--- A simple SMTP Client for sending Gmail.
+-- A dead simple SMTP Client for sending Gmail.
 module Network.Mail.Client.Gmail (
 
  -- ** Sending
        sendGmail
 
+ -- ** Exceptions
+     , GmailException(..)
+
      ) where
 
-import Control.Monad (foldM_, forM)
-import Control.Exception (bracket)
+import Control.Applicative ((<$>))
+import Control.Monad (forever, forM)
+import Control.Monad.IO.Class (MonadIO(..))
+import Control.Monad.Trans.Resource (ResourceT, runResourceT)
+import Control.Exception (Exception, bracket, throw)
 import Crypto.Random.AESCtr (makeSystem)
-import Data.ByteString.Char8 (lines, unpack)
+import Data.Attoparsec.ByteString.Char8 as P
+import Data.ByteString.Char8 as B (ByteString, pack)
 import Data.ByteString.Base64.Lazy (encode)
-import Data.ByteString.Lazy.Char8 (ByteString, readFile)
+import Data.ByteString.Lazy.Char8 as L (ByteString, hPutStrLn, readFile)
 import Data.ByteString.Lazy.Search (replace)
-import Data.Char (isDigit, isSpace)
+import Data.Conduit
+import Data.Conduit.Attoparsec (sinkParser)
 import Data.Default (def)
 import Data.Monoid ((<>))
-import Data.Text as Strict (Text, pack)
-import Data.Text.Lazy as Lazy (Text, fromChunks)
+import Data.Text as S (Text, pack)
+import Data.Text.Lazy as L (Text, fromChunks)
 import Data.Text.Lazy.Encoding (encodeUtf8)
+import Data.Typeable (Typeable)
 import Network (PortID(PortNumber), connectTo)
 import Network.Mail.Mime hiding (renderMail)
 import Network.TLS
-import Network.TLS.Extra
-import Prelude hiding (any, lines, readFile)
-import System.FilePath (takeExtension, takeFileName)
+import Network.TLS.Extra (ciphersuite_all)
+import Prelude hiding (any, readFile)
+import System.FilePath (takeExtension, takeFileName) 
 import System.IO hiding (readFile)
+import System.Timeout (timeout)
 
--- | Send an email from your Gmail account using the
---   simple message transfer protocol with transport
---   layer security. If you have 2-step verification
---   enabled on your account, then you will need to
---   retrieve an application specific password before
---   using this function. Below is an example using
---   ghci, where Alice sends an Excel spreadsheet to
---   Bob.
+data GmailException =
+     ParseError String
+   | Timeout
+     deriving (Show, Typeable)
+
+instance Exception GmailException
+
+-- |
+-- Send an email from your Gmail account using the
+-- simple message transfer protocol with transport
+-- layer security. If you have 2-step verification
+-- enabled on your account, then you will need to
+-- retrieve an application specific password before
+-- using this function. Below is an example using
+-- ghci, where Alice sends an Excel spreadsheet to
+-- Bob.
 --
 -- > >>> :set -XOverloadedStrings
 -- > >>> :module Network.Mail.Mime Network.Mail.Client.Gmail
--- > >>> sendGmail "alice" "password" (Address (Just "Alice") "alice@gmail.com") [Address (Just "Bob") "bob@example.com"] [] [] "Excel Spreadsheet" "Hi Bob,\n\nThe Excel spreadsheet is attached.\n\nRegards,\n\nAlice" ["Spreadsheet.xls"]
+-- > >>> sendGmail "alice" "password" (Address (Just "Alice") "alice@gmail.com") [Address (Just "Bob") "bob@example.com"] [] [] "Excel Spreadsheet" "Hi Bob,\n\nThe Excel spreadsheet is attached.\n\nRegards,\n\nAlice" ["Spreadsheet.xls"] 10000000
 --
 sendGmail
-   :: Lazy.Text   -- ^ username
-   -> Lazy.Text   -- ^ password
-   -> Address     -- ^ from
-   -> [Address]   -- ^ to
-   -> [Address]   -- ^ cc
-   -> [Address]   -- ^ bcc
-   -> Strict.Text -- ^ subject
-   -> Lazy.Text   -- ^ body
-   -> [FilePath]  -- ^ attachments
-   -> IO ()
-sendGmail user pass from to cc bcc subject body attach = 
-   bracket (connectTo "smtp.gmail.com" $ PortNumber 587) hClose $ \ hdl -> do
-      sys   <- makeSystem
-      ctx   <- contextNew hdl params sys
-      _MAIL <- renderMail from to cc bcc subject body attach
-      hSetBuffering hdl LineBuffering
-      sendSMTP  hdl "EHLO"       >> recvSMTP  hdl "220"
-                                 >> recvSMTP  hdl "250"
-      sendSMTP  hdl "STARTTLS"   >> recvSMTP  hdl "220"
+  :: L.Text     -- ^ username
+  -> L.Text     -- ^ password
+  -> Address    -- ^ from
+  -> [Address]  -- ^ to
+  -> [Address]  -- ^ cc
+  -> [Address]  -- ^ bcc
+  -> S.Text     -- ^ subject
+  -> L.Text     -- ^ body
+  -> [FilePath] -- ^ attachments
+  -> Int        -- ^ timeout (in microseconds)
+  -> IO ()
+sendGmail user pass from to cc bcc subject body attachments micros = do
+  let handle = connectTo "smtp.gmail.com" $ PortNumber 587
+  bracket handle hClose $ \ hdl -> do
+    recvSMTP hdl micros "220"
+    sendSMTP hdl "EHLO"
+    recvSMTP hdl micros "250"
+    sendSMTP hdl "STARTTLS"
+    recvSMTP hdl micros "220"
+    let context = contextNew hdl params =<< makeSystem
+    bracket context cClose $ \ ctx -> do
       handshake ctx
-      sendSMTPS ctx "EHLO"       >> recvSMTPS ctx "250"
-      sendSMTPS ctx "AUTH LOGIN" >> recvSMTPS ctx "334"
-      sendSMTPS ctx _USERNAME    >> recvSMTPS ctx "334"
-      sendSMTPS ctx _PASSWORD    >> recvSMTPS ctx "235"
-      sendSMTPS ctx _FROM        >> recvSMTPS ctx "250"
-      sendSMTPS ctx _TO          >> recvSMTPS ctx "250"
-      sendSMTPS ctx "DATA"       >> recvSMTPS ctx "354"
-      sendSMTPS ctx _MAIL        >> recvSMTPS ctx "250"
-      sendSMTPS ctx "QUIT"       >> recvSMTPS ctx "221"
-      bye ctx
-      contextClose ctx
-      where _USERNAME  = encode $ encodeUtf8 user
-            _PASSWORD  = encode $ encodeUtf8 pass
-            _FROM      = "MAIL FROM: " <> angleBracket [from]
-            _TO        = "RCPT TO: "   <> angleBracket (to ++ cc ++ bcc)
+      sendSMTPS ctx "EHLO"
+      recvSMTPS ctx micros "250"
+      sendSMTPS ctx "AUTH LOGIN"
+      recvSMTPS ctx micros "334"
+      sendSMTPS ctx username
+      recvSMTPS ctx micros "334"
+      sendSMTPS ctx password
+      recvSMTPS ctx micros "235"
+      sendSMTPS ctx sender
+      recvSMTPS ctx micros "250"
+      sendSMTPS ctx recipient
+      recvSMTPS ctx micros "250"
+      sendSMTPS ctx "DATA"
+      recvSMTPS ctx micros "354"
+      sendSMTPS ctx =<< mail
+      recvSMTPS ctx micros "250"
+      sendSMTPS ctx "QUIT"
+      recvSMTPS ctx micros "221"
+      where username  = encode $ encodeUtf8 user
+            password  = encode $ encodeUtf8 pass
+            sender    = "MAIL FROM: " <> angleBracket [from]
+            recipient = "RCPT TO: "   <> angleBracket (to ++ cc ++ bcc)
+            mail      = renderMail from to cc bcc subject body attachments
 
--- | Display the first email address in the given list using angle bracket formatting.
-angleBracket :: [Address] -> ByteString
-angleBracket = \ case [] -> ""; (Address _ email:_) -> "<" <> encodeUtf8 (fromChunks [email]) <> ">"
+-- |
+-- Consume the SMTP packet stream.
+sink :: B.ByteString -> Sink (Maybe B.ByteString) (ResourceT IO) ()
+sink code = (awaitForever $ maybe (throw Timeout) yield) =$= sinkParser (parser code)
 
--- | Render an email using the RFC 2822 message format.
-renderMail
-   :: Address     -- ^ from
-   -> [Address]   -- ^ to
-   -> [Address]   -- ^ cc
-   -> [Address]   -- ^ bcc
-   -> Strict.Text -- ^ subject
-   -> Lazy.Text   -- ^ body
-   -> [FilePath]  -- ^ attachments
-   -> IO ByteString
-renderMail from to cc bcc subject body attach = do
-   parts <- forM attach $ \ path -> do
-      content <- readFile path
-      let mime = getMime $ takeExtension path
-          file = Just . pack $ takeFileName path
-      return $! [Part mime Base64 file [] content]
-   let plain = [Part "text/plain; charset=utf-8" QuotedPrintableText Nothing [] $ encodeUtf8 body]
-   mail <- renderMail' . Mail from to cc bcc headers $ plain : parts
-   return $! replace "\n." ("\n.."::ByteString) mail <> "\r\n.\r\n"
-   where headers = [("Subject",subject)]
+-- |
+-- Parse the SMTP packet stream.
+parser :: B.ByteString -> P.Parser ()
+parser code = do
+   reply <- P.take 3
+   if code /= reply
+   then throw . ParseError $ "Expected SMTP reply code " ++ show code ++ ", but recieved SMTP reply code " ++ show reply ++ "."
+   else anyChar >>= \ case
+        ' ' -> return ()
+        '-' -> manyTill anyChar endOfLine >> parser code
+        _   -> throw $ ParseError "Unexpected character."
 
--- | Send an unencrypted message using the simple message transfer protocol.
-sendSMTP :: Handle -> String -> IO ()
-sendSMTP = hPutStrLn
-
--- | Receive an unencrypted message using the simple message transfer protocol.
-recvSMTP :: Handle -> String -> IO ()
-recvSMTP hdl code = go [] >> return ()
-   where go accum = hGetLine hdl >>= \ reply -> match code reply go accum
-
--- | Send an encrypted message using the simple message transfer protocol.
-sendSMTPS :: Context -> ByteString -> IO ()
-sendSMTPS ctx msg = sendData ctx $ msg <> "\r\n"
-
--- | Receive an encrypted message using the simple message transfer protocol.
-recvSMTPS :: Context -> String -> IO ()
-recvSMTPS ctx code = recvData ctx >>= foldM_ step [] . lines
-   where step accum reply = match code (unpack reply) return accum
-
--- | A convenient type synonym.
-type Continuation = [String] -> IO [String]
-
--- | Match reply codes and perform continuation, termination, and failure case analysis.
-match
-   :: String       -- ^ expected reply code
-   -> String       -- ^ actual reply code
-   -> Continuation -- ^ continuation
-   -> [String]     -- ^ accumulator
-   -> IO [String]
-match code reply go accum =
-   if not (null suffix) && head suffix == '-'
-   then go $ drop 1 suffix:accum
-   else if prefix == code && "" /= code
-        then return []
-        else mismatch code prefix $ suffix:accum
-        where (prefix, suffix) = break (not . isDigit) reply
-
--- | Raise an exception for mismatched reply codes.
-mismatch
-   :: String   -- ^ expected reply code
-   -> String   -- ^ actual reply code
-   -> [String] -- ^ messages
-   -> IO [String]
-mismatch code other replies = fail $
-   if null code
-   then "mismatch: missing expected reply code."
-   else "mismatch: expected reply code " ++ code ++
-    (if null other
-     then ", but no reply code was received"
-     else ", but received reply code " ++ other) ++
-     case filter (not . null) $ map strip replies of
-       []     -> "."
-       (r:rs) -> ": " ++ foldl step (strip r) rs ++ "."
-       where strip = dropWhile isSpace . filter (/='\r')
-             step accum = flip (++) $ "; " ++ accum
-
--- | TLS client parameters.
-params :: ClientParams 
+-- |
+-- Define the TLS client parameters.
+params :: ClientParams
 params = (defaultParamsClient "smtp.gmail.com" "587")
    { clientSupported  = def { supportedCiphers      = ciphersuite_all }
    , clientShared     = def { sharedValidationCache = noValidate      }
-   } where noValidate = ValidationCache (\_ _ _ -> return ValidationCachePass)
+   } where noValidate = ValidationCache (\_ _ _ -> return ValidationCachePass) -- This is not secure!
                                         (\_ _ _ -> return ())
 
--- | Get the mime type for the given file extension.
-getMime :: String -> Strict.Text
+-- |
+-- Terminate the TLS connection.
+cClose :: Context -> IO ()
+cClose ctx = bye ctx >> contextClose ctx
+
+-- |
+-- Display the first email address in the
+-- given list using angle bracket formatting.
+angleBracket :: [Address] -> L.ByteString
+angleBracket = \ case [] -> ""; (Address _ email:_) -> "<" <> encodeUtf8 (fromChunks [email]) <> ">"
+
+-- |
+-- Send an unencrypted.
+sendSMTP :: Handle -> L.ByteString -> IO ()
+sendSMTP = L.hPutStrLn
+
+-- |
+-- Send an encrypted message.
+sendSMTPS :: Context -> L.ByteString -> IO ()
+sendSMTPS ctx msg = sendData ctx $ msg <> "\r\n"
+
+-- |
+-- Receive an unencrypted.
+recvSMTP :: Handle -> Int -> B.ByteString -> IO ()
+recvSMTP hdl micros code =
+  runResourceT $ source $$ sink code
+  where source = forever $ liftIO chunk >>= yield
+        chunk  = timeout micros $ append <$> hGetLine hdl
+        append = flip (<>) "\n" . B.pack
+
+-- |
+-- Receive an encrypted message.
+recvSMTPS :: Context -> Int -> B.ByteString -> IO ()
+recvSMTPS ctx micros code =
+  runResourceT $ source $$ sink code
+  where source = forever $ liftIO chunk >>= yield
+        chunk  = timeout micros $ recvData ctx
+
+-- |
+-- Render an email using the RFC 2822 message format.
+renderMail
+  :: Address    -- ^ from
+  -> [Address]  -- ^ to
+  -> [Address]  -- ^ cc
+  -> [Address]  -- ^ bcc
+  -> S.Text     -- ^ subject
+  -> L.Text     -- ^ body
+  -> [FilePath] -- ^ attachments
+  -> IO L.ByteString
+renderMail from to cc bcc subject body attach = do
+  parts <- forM attach $ \ path -> do
+    content <- readFile path
+    let mime = getMime $ takeExtension path
+        file = Just . S.pack $ takeFileName path
+    return $! [Part mime Base64 file [] content]
+  let plain = [Part "text/plain; charset=utf-8" QuotedPrintableText Nothing [] $ encodeUtf8 body]
+  mail <- renderMail' . Mail from to cc bcc headers $ plain : parts
+  return $! replace "\n." ("\n.." :: L.ByteString) mail <> "\r\n.\r\n"
+  where headers = [("Subject", subject)]
+
+-- |
+-- Get the mime type for the given file extension.
+getMime :: String -> S.Text
 getMime = \ case
    ".3dm"       -> "x-world/x-3dmf"
    ".3dmf"      -> "x-world/x-3dmf"
