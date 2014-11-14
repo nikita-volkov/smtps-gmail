@@ -45,7 +45,7 @@ import Network.Mail.Mime hiding (renderMail)
 import Network.TLS
 import Network.TLS.Extra (ciphersuite_all)
 import Prelude hiding (any, readFile)
-import System.FilePath (takeExtension, takeFileName) 
+import System.FilePath (takeExtension, takeFileName)
 import System.IO hiding (readFile)
 import System.Timeout (timeout)
 
