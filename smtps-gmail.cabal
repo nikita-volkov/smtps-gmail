@@ -1,5 +1,5 @@
 Name:               smtps-gmail
-Version:            1.3.0
+Version:            1.3.1
 License:            BSD3
 License-File:       LICENSE
 Copyright:          Copyright (c) 2014, Enzo Haussecker. All rights reserved.
@@ -23,7 +23,6 @@ Library
                     bytestring,
                     conduit,
                     conduit-extra,
-                    cprng-aes,
                     data-default >= 0.5.3,
                     filepath,
                     mime-mail,
@@ -32,4 +31,4 @@ Library
                     stringsearch,
                     transformers,
                     text,
-                    tls >= 1.2 && < 1.3
+                    tls >= 1.3 && < 1.4
