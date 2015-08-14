@@ -26,7 +26,6 @@ import Control.Monad (forever, forM)
 import Control.Monad.IO.Class (MonadIO(..))
 import Control.Monad.Trans.Resource (ResourceT, runResourceT)
 import Control.Exception (Exception, bracket, throw)
-import Crypto.Random.AESCtr (makeSystem)
 import Data.Attoparsec.ByteString.Char8 as P
 import Data.ByteString.Char8 as B (ByteString, pack)
 import Data.ByteString.Base64.Lazy (encode)
@@ -90,7 +89,7 @@ sendGmail user pass from to cc bcc subject body attachments micros = do
     recvSMTP hdl micros "250"
     sendSMTP hdl "STARTTLS"
     recvSMTP hdl micros "220"
-    let context = contextNew hdl params =<< makeSystem
+    let context = contextNew hdl params
     bracket context cClose $ \ ctx -> do
       handshake ctx
       sendSMTPS ctx "EHLO"
